@@ -7,6 +7,7 @@ import torch.nn as nn
 import math
 from torch.autograd import Variable
 import torch.autograd as autograd
+import random
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -53,7 +54,8 @@ class BasicBlock(nn.Module):
 
 class ResNet(nn.Module):
     """Original ResNet without routing modules"""
-    def __init__(self, block, layers, num_classes=10):
+    def __init__(self, block, layers, num_classes=10, randInd=0):
+        self.randInd = randInd
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = conv3x3(3, 16)
@@ -91,6 +93,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -551,10 +554,10 @@ class RNNGate(nn.Module):
 
     def init_hidden(self, batch_size):
         # The axes semantics are (num_layers, minibatch_size, hidden_dim)
-        return (autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()),
-                autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()))
+        return (torch.zeros(1, batch_size,
+                            self.hidden_dim).cuda(),
+                torch.zeros(1, batch_size,
+                            self.hidden_dim).cuda())
 
     def repackage_hidden(self):
         self.hidden = repackage_hidden(self.hidden)
@@ -593,10 +596,10 @@ class SoftRNNGate(nn.Module):
         self.prob = nn.Sigmoid()
 
     def init_hidden(self, batch_size):
-        return (autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()),
-                autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()))
+        return (torch.zeros(1, batch_size,
+                            self.hidden_dim).cuda(),
+                torch.zeros(1, batch_size,
+                            self.hidden_dim.cuda()))
 
     def repackage_hidden(self):
         self.hidden = repackage_hidden(self.hidden)
@@ -1115,10 +1118,10 @@ class RNNGatePolicy(nn.Module):
 
     def init_hidden(self, batch_size):
         # The axes semantics are (num_layers, minibatch_size, hidden_dim)
-        return (autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()),
-                autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()))
+        return (torch.zeros(1, batch_size,
+                                              self.hidden_dim).cuda(),
+                torch.zeros(1, batch_size,
+                                              self.hidden_dim).cuda())
 
     def repackage_hidden(self):
         self.hidden = repackage_hidden(self.hidden)
