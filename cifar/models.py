@@ -8,6 +8,7 @@ import math
 from torch.autograd import Variable
 import torch.autograd as autograd
 import random
+from itertools import chain
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -19,9 +20,11 @@ def conv3x3(in_planes, out_planes, stride=1):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, randInd=0, freezeBN=True):
         super(BasicBlock, self).__init__()
         self.conv1 = conv3x3(inplanes, planes, stride)
+        self.freezeBN = freezeBN
+        self.randInd = randInd
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
@@ -30,7 +33,20 @@ class BasicBlock(nn.Module):
         self.stride = stride
 
     def forward(self, x):
-        residual = x
+        refreshFreeze = x['refreshFreeze']
+        x = residual = x['x']
+
+        if refreshFreeze:
+            if random.random() <= self.randInd:
+                for param in chain(self.conv1.parameters(), self.conv2.parameters()):
+                    param.requires_grad = False
+                if self.freezeBN:
+                    for param in chain(self.bn1.parameters(), self.bn2.parameters()):
+                        param.requires_grad = False
+            else:
+                for param in chain(self.conv1.parameters(), self.bn1.parameters(),
+                                   self.conv2.parameters(), self.bn2.parameters()):
+                    param.requires_grad = True
 
         out = self.conv1(x)
         out = self.bn1(out)
@@ -40,11 +56,18 @@ class BasicBlock(nn.Module):
         out = self.bn2(out)
 
         if self.downsample is not None:
+            if random.random() <= self.randInd:
+                for param in self.downsample:
+                    param.requires_grad = False
+            else:
+                for param in self.downsample:
+                    param.requires_grad = True
+
             residual = self.downsample(x)
 
         out += residual
         out = self.relu(out)
-        return out
+        return {'x': out, 'refreshFreeze': refreshFreeze}
 
 
 ########################################
@@ -54,8 +77,11 @@ class BasicBlock(nn.Module):
 
 class ResNet(nn.Module):
     """Original ResNet without routing modules"""
-    def __init__(self, block, layers, num_classes=10, randInd=0):
+    def __init__(self, block, layers, num_classes=10, randInd=0, freezeBN=True):
         self.randInd = randInd
+        self.freezeBN = freezeBN
+        print("randInd is {}".format(randInd))
+        print("freezeBN is {}".format(freezeBN))
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = conv3x3(3, 16)
@@ -85,22 +111,34 @@ class ResNet(nn.Module):
             )
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
+        layers.append(block(self.inplanes, planes, stride, downsample, randInd=self.randInd, freezeBN=self.freezeBN))
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+            layers.append(block(self.inplanes, planes, randInd=self.randInd))
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, refreshFreeze = False):
+        if refreshFreeze:
+            if random.random() <= self.randInd:
+                for param in self.conv1.parameters():
+                    param.requires_grad = False
+                if self.freezeBN:
+                    for param in self.bn1.parameters():
+                        param.requires_grad = False
+            else:
+                for param in chain(self.conv1.parameters(), self.bn1.parameters()):
+                    param.requires_grad = True
 
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
 
+        x = {'x': x, 'refreshFreeze': refreshFreeze}
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
+        x = x['x']
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)

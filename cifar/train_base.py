@@ -32,6 +32,8 @@ def parse_args():
                         help='model architecture: ' +
                              ' | '.join(model_names) +
                              ' (default: cifar10_resnet_110)')
+    parser.add_argument('experiment', default='unknown', type=str,
+                        help='the experiment name')
     parser.add_argument('--dataset', '-d', type=str, default='cifar10',
                         choices=['cifar10', 'cifar100'],
                         help='dataset choice')
@@ -60,10 +62,20 @@ def parse_args():
     parser.add_argument('--warm-up', action='store_true',
                         help='for n = 18, the model needs to warm up for 400 '
                              'iterations')
-    parser.add_argument('--save-folder', default='checkpoints/basic/', type=str,
+    parser.add_argument('--save-folder', default='checkpoints/', type=str,
                         help='folder to save the checkpoints')
     parser.add_argument('--eval-every', default=1000, type=int,
                         help='evaluate model every (default: 1000) iterations')
+    parser.add_argument('--randInd', default=0.0, type=float,
+                        help='the proportion of freezed params')
+    parser.add_argument('--refreshFreeze', default=1000, type=int,
+                        help='the iteration number the refresh the target freezing layer')
+    parser.add_argument('--initIters', default=0, type=int,
+                        help='the iterations train with whole network, provide as a initialization')
+    parser.add_argument('--freezeBN', action='store_true',
+                        help='If the batch norm is randomly freezed while training')
+    parser.add_argument('--endFinetune', default=0, type=int,
+                        help='the iterations for finetuning the whole network')
     args = parser.parse_args()
     return args
 
@@ -75,34 +87,52 @@ def main():
     device = torch.device("cuda" if cuda and torch.cuda.is_available() else "cpu")
     args.device = device
 
-    save_path = args.save_path = os.path.join(args.save_folder, args.arch)
+    save_path = args.save_path = os.path.join(args.save_folder, args.experiment, args.arch)
+
+    # first, detect four model saving folder
+    if os.path.exists(save_path):
+        print("the folder of this experiment already exists, Please check if it's safe to overwrite")
+        return
+    else:
+        print("making directory for result saving")
+        os.makedirs(save_path)
+
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
     # config logging file
     args.logger_file = os.path.join(save_path, 'log_{}.txt'.format(args.cmd))
-    handlers = [logging.FileHandler(args.logger_file, mode='w'),
-                logging.StreamHandler()]
-    logging.basicConfig(level=logging.INFO,
-                        datefmt='%m-%d-%y %H:%M',
-                        format='%(asctime)s:%(message)s',
-                        handlers=handlers)
+    # handlers = [logging.FileHandler(args.logger_file, mode='w'),
+    #             logging.StreamHandler()]
+    # logging.basicConfig(level=logging.INFO,
+    #                     datefmt='%m-%d-%y %H:%M',
+    #                     format='%(asctime)s:%(message)s',
+    #                     handlers=handlers)
+
+    # create logger with 'spam_application'
+    logger = logging.getLogger('train')
+    logger.setLevel(logging.DEBUG)
+    # create file handler which logs even debug messages
+    fh = logging.FileHandler(args.logger_file)
+    fh.setLevel(logging.DEBUG)
+    logger.addHandler(fh)
+    logger.addHandler(logging.StreamHandler())
 
     if args.cmd == 'train':
-        logging.info('start training {}'.format(args.arch))
-        run_training(args)
+        logger.info('start training {}'.format(args.arch))
+        run_training(args, logger)
 
     elif args.cmd == 'test':
-        logging.info('start evaluating {} with checkpoints from {}'.format(
+        logger.info('start evaluating {} with checkpoints from {}'.format(
             args.arch, args.resume))
-        test_model(args)
+        test_model(args, logger)
 
 
-def run_training(args):
+def run_training(args, logger):
     device = args.device
 
     # create model
-    model = models.__dict__[args.arch](args.pretrained)
+    model = models.__dict__[args.arch](args.pretrained, randInd=args.randInd, freezeBN=args.freezeBN)
     model = model.to(device)
 
     best_prec1 = 0
@@ -110,16 +140,16 @@ def run_training(args):
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
-            logging.info('=> loading checkpoint `{}`'.format(args.resume))
+            logger.info('=> loading checkpoint `{}`'.format(args.resume))
             checkpoint = torch.load(args.resume)
             args.start_iter = checkpoint['iter']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
-            logging.info('=> loaded checkpoint `{}` (iter: {})'.format(
+            logger.info('=> loaded checkpoint `{}` (iter: {})'.format(
                 args.resume, checkpoint['iter']
             ))
         else:
-            logging.info('=> no checkpoint found at `{}`'.format(args.resume))
+            logger.info('=> no checkpoint found at `{}`'.format(args.resume))
 
     cudnn.benchmark = False
 
@@ -146,6 +176,8 @@ def run_training(args):
 
     end = time.time()
     dataloader_iterator = iter(train_loader)
+
+    finetuneIter = args.iters - args.endFinetune
     for i in range(args.start_iter, args.iters):
         model.train()
         adjust_learning_rate(args, optimizer, i)
@@ -163,7 +195,13 @@ def run_training(args):
         target = target.squeeze().long().to(device)
 
         # compute output
-        output = model(input)
+        refreshFlag = True
+        if i >= finetuneIter:
+            for param in model.parameters():
+                param.requires_grad = True
+            refreshFlag = False
+
+        output = model(input, refreshFreeze=(i >= args.initIters) and (i % args.refreshFreeze == 0) and refreshFlag)
         loss = criterion(output, target)
 
         # measure accuracy and record loss
@@ -182,7 +220,7 @@ def run_training(args):
 
         # print log
         if i % args.print_freq == 0:
-            logging.info("Iter: [{0}/{1}]\t"
+            logger.info("Iter: [{0}/{1}]\t"
                          "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
                          "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
                          "Loss {loss.val:.3f} ({loss.avg:.3f})\t"
@@ -197,25 +235,25 @@ def run_training(args):
 
             # evaluate every 1000 steps
         if (i % args.eval_every == 0 and i > 0) or (i == args.iters - 1):
-            prec1 = validate(args, test_loader, model, criterion, device)
+            prec1 = validate(args, test_loader, model, criterion, device, logger)
             is_best = prec1 > best_prec1
             best_prec1 = max(prec1, best_prec1)
-            checkpoint_path = os.path.join(args.save_path,
-                                           'checkpoint_{:05d}.pth.tar'.format(
-                                               i))
-            save_checkpoint({
-                'iter': i,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_prec1': best_prec1,
-            },
-                is_best, filename=checkpoint_path)
-            shutil.copyfile(checkpoint_path, os.path.join(args.save_path,
-                                                          'checkpoint_latest'
-                                                          '.pth.tar'))
+            # checkpoint_path = os.path.join(args.save_path,
+            #                                'checkpoint_{:05d}.pth.tar'.format(
+            #                                    i))
+            # save_checkpoint({
+            #     'iter': i,
+            #     'arch': args.arch,
+            #     'state_dict': model.state_dict(),
+            #     'best_prec1': best_prec1,
+            # },
+            #     is_best, filename=checkpoint_path)
+            # shutil.copyfile(checkpoint_path, os.path.join(args.save_path,
+            #                                               'checkpoint_latest'
+            #                                               '.pth.tar'))
 
 
-def validate(args, test_loader, model, criterion, device):
+def validate(args, test_loader, model, criterion, device, logger):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -241,7 +279,7 @@ def validate(args, test_loader, model, criterion, device):
             end = time.time()
 
             if (i % args.print_freq == 0) or (i == len(test_loader) - 1):
-                logging.info(
+                logger.info(
                     'Test: [{}/{}]\t'
                     'Time: {batch_time.val:.4f}({batch_time.avg:.4f})\t'
                     'Loss: {loss.val:.3f}({loss.avg:.3f})\t'
@@ -251,27 +289,27 @@ def validate(args, test_loader, model, criterion, device):
                     )
                 )
 
-        logging.info(' * Prec@1 {top1.avg:.3f}'.format(top1=top1))
+        logger.info(' * Prec@1 {top1.avg:.3f}'.format(top1=top1))
     return top1.avg
 
 
-def test_model(args):
+def test_model(args, logger):
     # create model
     model = models.__dict__[args.arch](args.pretrained)
     model = torch.nn.DataParallel(model).cuda()
 
     if args.resume:
         if os.path.isfile(args.resume):
-            logging.info('=> loading checkpoint `{}`'.format(args.resume))
+            logger.info('=> loading checkpoint `{}`'.format(args.resume))
             checkpoint = torch.load(args.resume)
             args.start_iter = checkpoint['iter']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
-            logging.info('=> loaded checkpoint `{}` (iter: {})'.format(
+            logger.info('=> loaded checkpoint `{}` (iter: {})'.format(
                 args.resume, checkpoint['iter']
             ))
         else:
-            logging.info('=> no checkpoint found at `{}`'.format(args.resume))
+            logger.info('=> no checkpoint found at `{}`'.format(args.resume))
 
     cudnn.benchmark = False
     test_loader = prepare_test_data(dataset=args.dataset,
@@ -280,7 +318,7 @@ def test_model(args):
                                     num_workers=args.workers)
     criterion = nn.CrossEntropyLoss().cuda()
 
-    validate(args, test_loader, model, criterion, args.device)
+    validate(args, test_loader, model, criterion, args.device, logger)
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
@@ -321,8 +359,8 @@ def adjust_learning_rate(args, optimizer, _iter):
     else:
         lr = args.lr
 
-    if _iter % args.eval_every == 0:
-        logging.info('Iter [{}] learning rate = {}'.format(_iter, lr))
+    # if _iter % args.eval_every == 0:
+    #     logging.info('Iter [{}] learning rate = {}'.format(_iter, lr))
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
