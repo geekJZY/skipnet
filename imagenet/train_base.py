@@ -24,13 +24,15 @@ model_names = sorted(name for name in models.__dict__
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
     parser.add_argument('cmd', choices=['train', 'test', 'map', 'locate'])
-    parser.add_argument('--data', type=str, default='/home/ubuntu/imagenet/',
+    parser.add_argument('--data', type=str, default='/ssd2/bansa01/imagenet_final/',
                         help='path to dataset')
-    parser.add_argument('arch',  default='resnet74',
+    parser.add_argument('arch',  default='resnet101',
                         choices=model_names,
                         help='model architecture: ' +
                              ' | '.join(model_names) +
                              ' (default: resnet74)')
+    parser.add_argument('experiment', default='unknown', type=str,
+                        help='the experiment name')
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
     parser.add_argument('--epochs', default=120, type=int, metavar='N',
@@ -54,7 +56,7 @@ def parse_args():
                         help='evaluate model on validation set')
     parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                         help='use pre-trained model')
-    parser.add_argument('--save-folder', default='save_checkpoints', type=str,
+    parser.add_argument('--save-folder', default='checkpoints', type=str,
                         help='folder to save the checkpoints')
     parser.add_argument('--lr-adjust', dest='lr_adjust',
                         choices=['linear', 'step'], default='step')
@@ -63,6 +65,14 @@ def parse_args():
                         default=256)
     parser.add_argument('--step-ratio', dest='step_ratio', type=float,
                         default=0.1)
+    parser.add_argument('--randInd', default=0.0, type=float,
+                        help='the proportion of freezed params')
+    parser.add_argument('--refreshFreeze', default=1, type=int,
+                        help='the epoch number the refresh the target freezing layer')
+    # parser.add_argument('--freezeBN', action='store_true',
+    #                     help='If the batch norm is randomly freezed while training')
+    parser.add_argument('--endFinetune', default=0, type=int,
+                        help='the epochs for finetuning the whole network')
 
     args = parser.parse_args()
     return args
@@ -70,48 +80,59 @@ def parse_args():
 
 def main():
     args = parse_args()
-    args.save_path = save_path = os.path.join(args.save_folder, args.arch)
-    os.makedirs(args.save_path, exist_ok=True)
 
+    cuda = True
+    device = torch.device("cuda" if cuda and torch.cuda.is_available() else "cpu")
+    args.device = device
+
+    args.save_path = save_path = os.path.join(args.save_folder, args.experiment, args.arch)
+
+    # first, detect four model saving folder
+    if os.path.exists(save_path):
+        print("the folder of this experiment already exists, Please check if it's safe to overwrite")
+        return
+    else:
+        print("making directory for result saving")
+        os.makedirs(save_path)
+
+    # create logger with 'spam_application'
     args.logger_file = os.path.join(save_path, 'log_{}.txt'.format(args.cmd))
-    handlers = [
-        logging.FileHandler(args.logger_file, mode='w'),
-        logging.StreamHandler()]
-
-    logging.basicConfig(level=logging.INFO,
-                        datefmt='%m-%d-%y %H:%M',
-                        format='%(asctime)s:%(message)s',
-                        handlers=handlers
-                        )
+    logger = logging.getLogger('train')
+    logger.setLevel(logging.DEBUG)
+    # create file handler which logs even debug messages
+    fh = logging.FileHandler(args.logger_file)
+    fh.setLevel(logging.DEBUG)
+    logger.addHandler(fh)
+    logger.addHandler(logging.StreamHandler())
 
     if args.cmd == 'train':
-        logging.info("start training {}".format(args.arch))
-        run_training(args)
+        logger.info("start training {}".format(args.arch))
+        run_training(args, logger)
     elif args.cmd == 'test':
-        logging.info('start evaluating {} with checkpoints from {},'
-                     .format( args.arch, args.resume))
-        test_model(args)
+        logger.info('start evaluating {} with checkpoints from {},'
+                     .format(args.arch, args.resume))
+        test_model(args, logger)
 
 
-def run_training(args):
+def run_training(args, logger):
     # create model
-    model = models.__dict__[args.arch](args.pretrained)
-    model = torch.nn.DataParallel(model).cuda()
+    model = models.__dict__[args.arch](args.pretrained, randInd=args.randInd)
+    model = torch.nn.DataParallel(model).to(args.device)
 
     best_prec1 = 0
 
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
-            logging.info("=> loading checkpoint '{}'".format(args.resume))
+            logger.info("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
-            logging.info("=> loaded checkpoint '{}' (epoch {})"
+            logger.info("=> loaded checkpoint '{}' (epoch {})"
                          .format(args.resume, checkpoint['epoch']))
         else:
-            logging.info("=> no checkpoint found at '{}'".format(args.resume))
+            logger.info("=> no checkpoint found at '{}'".format(args.resume))
 
     cudnn.benchmark = True
 
@@ -142,20 +163,23 @@ def run_training(args):
         num_workers=args.workers, pin_memory=True)
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = nn.CrossEntropyLoss().to(args.device)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
+    finetuneEpoch = args.epochs - args.endFinetune
     for epoch in range(args.start_epoch, args.epochs):
-        adjust_learning_rate(args, optimizer, epoch)
+        adjust_learning_rate(args, optimizer, epoch, logger)
 
         # train for one epoch
-        train(args, train_loader, model, criterion, optimizer, epoch)
+
+        # train(args, train_loader, model, criterion, optimizer, epoch, args.device, logger,
+        #       refreshFreeze=(epoch % args.refreshFreeze == 0), finetuneFlag=(epoch >= finetuneEpoch))
 
         # evaluate on validation set
-        prec1 = validate(args, val_loader, model, criterion)
+        prec1 = validate(args, val_loader, model, criterion, logger)
 
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
@@ -173,23 +197,23 @@ def run_training(args):
                         os.path.join(args.save_path, 'checkpoint_latest.pth.tar'))
 
 
-def test_model(args):
+def test_model(args, logger):
     # create model
     model = models.__dict__[args.arch](args.pretrained)
 
-    model = torch.nn.DataParallel(model).cuda()
+    model = torch.nn.DataParallel(model).to(args.device)
 
     if args.resume:
         if os.path.isfile(args.resume):
-            logging.info("=> loading checkpoint '{}'".format(args.resume))
+            logger.info("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
-            logging.info("=> loaded checkpoint '{}' (epoch {})"
+            logger.info("=> loaded checkpoint '{}' (epoch {})"
                          .format(args.resume, checkpoint['epoch']))
         else:
-            logging.info("=> no checkpoint found at '{}'".format(args.resume))
+            logger.info("=> no checkpoint found at '{}'".format(args.resume))
 
     cudnn.benchmark = True
 
@@ -208,12 +232,12 @@ def test_model(args):
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = nn.CrossEntropyLoss().to(args.device)
 
-    validate(args, val_loader, model, criterion)
+    validate(args, val_loader, model, criterion, logger)
 
 
-def train(args, train_loader, model, criterion, optimizer, epoch):
+def train(args, train_loader, model, criterion, optimizer, epoch, device, logger, refreshFreeze, finetuneFlag):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -224,23 +248,29 @@ def train(args, train_loader, model, criterion, optimizer, epoch):
     model.train()
 
     end = time.time()
+
+    # compute output
+    if finetuneFlag:
+        for param in model.parameters():
+            param.requires_grad = True
+
     for i, (input, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        target = target.cuda(async=True)
-        input_var = torch.autograd.Variable(input)
-        target_var = torch.autograd.Variable(target)
+        input = input.to(device)
+        target = target.to(device)
 
         # compute output
-        output = model(input_var)
-        loss = criterion(output, target_var)
+        model.module.refreshFreeze = (not finetuneFlag) and refreshFreeze
+        output = model(input)
+        loss = criterion(output, target)
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
-        top5.update(prec5[0], input.size(0))
+        losses.update(float(loss), input.size(0))
+        top1.update(float(prec1), input.size(0))
+        top5.update(float(prec5), input.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -252,7 +282,7 @@ def train(args, train_loader, model, criterion, optimizer, epoch):
         end = time.time()
 
         if i % args.print_freq == 0:
-            logging.info(
+            logger.info(
                 'Epoch: [{0}][{1}/{2}]\t'
                 'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                 'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -263,39 +293,39 @@ def train(args, train_loader, model, criterion, optimizer, epoch):
                     data_time=data_time, loss=losses, top1=top1, top5=top5))
 
 
-def validate(args, val_loader, model, criterion):
+def validate(args, val_loader, model, criterion, logger):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
     # switch to evaluate mode
+    device = args.device
     model.eval()
 
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
-        target = target.cuda(async=True)
-        input_var = torch.autograd.Variable(input, volatile=True)
-        target_var = torch.autograd.Variable(target, volatile=True)
+        target = target.to(device)
+        input = input.to(device)
 
         # compute output
-        output = model(input_var)
+        with torch.no_grad():
+            output = model(input)
 
-        loss = criterion(output, target_var)
+            loss = criterion(output, target)
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
-        top5.update(prec5[0], input.size(0))
-
+        losses.update(float(loss), input.size(0))
+        top1.update(float(prec1), input.size(0))
+        top5.update(float(prec5), input.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
         if i % args.print_freq == 0:
-            logging.info(
+            logger.info(
                 'Test: [{0}/{1}]\t'
                 'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                 'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
@@ -304,7 +334,7 @@ def validate(args, val_loader, model, criterion):
                     i, len(val_loader), batch_time=batch_time, loss=losses,
                     top1=top1, top5=top5))
 
-    logging.info(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
+    logger.info(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
                  .format(top1=top1, top5=top5))
 
     return top1.avg
@@ -336,10 +366,10 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def adjust_learning_rate(args, optimizer, epoch):
+def adjust_learning_rate(args, optimizer, epoch, logger):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
     lr = args.lr * (args.step_ratio ** (epoch // 30))
-    logging.info('Epoch [{}] Learning rate: {}'.format(epoch, lr))
+    logger.info('Epoch [{}] Learning rate: {}'.format(epoch, lr))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 

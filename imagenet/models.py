@@ -9,6 +9,8 @@ import torch.autograd as autograd
 from torch.autograd.variable import Variable
 from threading import Lock
 from torch.distributions import Categorical
+import random
+from itertools import chain
 
 global_lock = Lock()
 
@@ -63,9 +65,11 @@ class BasicBlock(nn.Module):
 class Bottleneck(nn.Module):
     expansion = 4
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, randInd=0, freezeBN=True):
         super(Bottleneck, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
+        self.randInd = randInd
+        self.freezeBN = freezeBN
         self.bn1 = nn.BatchNorm2d(planes)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride,
                                padding=1, bias=False)
@@ -77,7 +81,21 @@ class Bottleneck(nn.Module):
         self.stride = stride
 
     def forward(self, x):
-        residual = x
+        refreshFreeze = x['refreshFreeze']
+        x = residual = x['x']
+
+        if refreshFreeze:
+            if random.random() <= self.randInd:
+                for param in chain(self.conv1.parameters(), self.conv2.parameters(), self.conv3.parameters()):
+                    param.requires_grad = False
+                if self.freezeBN:
+                    for param in chain(self.bn1.parameters(), self.bn2.parameters(), self.bn3.parameters()):
+                        param.requires_grad = False
+            else:
+                for param in chain(self.conv1.parameters(), self.bn1.parameters(),
+                                   self.conv2.parameters(), self.bn2.parameters(),
+                                   self.conv3.parameters(), self.bn3.parameters()):
+                    param.requires_grad = True
 
         out = self.conv1(x)
         out = self.bn1(out)
@@ -91,12 +109,19 @@ class Bottleneck(nn.Module):
         out = self.bn3(out)
 
         if self.downsample is not None:
+            if refreshFreeze:
+                if random.random() <= self.randInd:
+                    for param in self.downsample.parameters():
+                        param.requires_grad = False
+                else:
+                    for param in self.downsample.parameters():
+                        param.requires_grad = True
             residual = self.downsample(x)
 
         out += residual
         out = self.relu(out)
 
-        return out
+        return {'x': out, 'refreshFreeze': refreshFreeze}
 
 
 # ==============================
@@ -104,7 +129,13 @@ class Bottleneck(nn.Module):
 # ==============================
 
 class ResNet(nn.Module):
-    def __init__(self, block, layers, num_classes=1000):
+    def __init__(self, block, layers, num_classes=1000, randInd=0, freezeBN=True):
+        self.randInd = randInd
+        self.freezeBN = freezeBN
+        self.refreshFreeze = False
+        print("randInd is {}".format(randInd))
+        print("freezeBN is {}".format(freezeBN))
+
         self.inplanes = 64
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
@@ -137,27 +168,43 @@ class ResNet(nn.Module):
             )
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
+        layers.append(block(self.inplanes, planes, stride, downsample, randInd=self.randInd, freezeBN=self.freezeBN))
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+            layers.append(block(self.inplanes, planes, randInd=self.randInd))
 
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        # if self refreshFreeze is set as True. Refresh all the params in this forward and set it back to False at last
+        if self.refreshFreeze:
+            if random.random() <= self.randInd:
+                for param in self.conv1.parameters():
+                    param.requires_grad = False
+                if self.freezeBN:
+                    for param in self.bn1.parameters():
+                        param.requires_grad = False
+            else:
+                for param in chain(self.bn1.parameters()):
+                    param.requires_grad = True
+
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
 
+        x = {'x': x, 'refreshFreeze': self.refreshFreeze}
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+        x = x['x']
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
+        self.refreshFreeze = False
+
         return x
 
 
