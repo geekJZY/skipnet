@@ -9,7 +9,7 @@ from torch.autograd import Variable
 import torch.autograd as autograd
 import random
 from itertools import chain
-
+from contextlib import ExitStack
 
 def conv3x3(in_planes, out_planes, stride=1):
     "3x3 convolution with padding"
@@ -35,12 +35,12 @@ class BasicBlock(nn.Module):
         freezeFlag = x['freezeFlag']
         x = residual = x['x']
 
-        if self.potentialFreezeFlag and freezeFlag:
-            for param in self.parameters():
-                param.requires_grad = False
-        else:
-            for param in self.parameters():
-                param.requires_grad = True
+        # if self.potentialFreezeFlag and freezeFlag:
+        #     for param in self.parameters():
+        #         param.requires_grad = False
+        # else:
+        #     for param in self.parameters():
+        #         param.requires_grad = True
 
         out = self.conv1(x)
         out = self.bn1(out)
@@ -113,25 +113,29 @@ class ResNet(nn.Module):
         if random.random() < self.randInd:
             freezeFlag = True
 
-        if freezeFlag:
-            for param in chain(self.conv1.parameters(), self.bn1.parameters()):
-                param.requires_grad = False
-        else:
-            for param in chain(self.conv1.parameters(), self.bn1.parameters()):
-                param.requires_grad = True
+        # if freezeFlag:
+        #     for param in chain(self.conv1.parameters(), self.bn1.parameters()):
+        #         param.requires_grad = False
+        # else:
+        #     for param in chain(self.conv1.parameters(), self.bn1.parameters()):
+        #         param.requires_grad = True
 
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
+        with ExitStack() as stack:
+            if freezeFlag:
+                stack.enter_context(torch.no_grad())
 
-        x = {'x': x, 'freezeFlag': freezeFlag}
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = x['x']
+            x = self.conv1(x)
+            x = self.bn1(x)
+            x = self.relu(x)
 
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
+            x = {'x': x, 'freezeFlag': False}
+            x = self.layer1(x)
+            x = self.layer2(x)
+            x = self.layer3(x)
+            x = x['x']
+
+            x = self.avgpool(x)
+            x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
 
