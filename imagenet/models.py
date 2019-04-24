@@ -11,6 +11,7 @@ from threading import Lock
 from torch.distributions import Categorical
 import random
 from itertools import chain
+from contextlib import ExitStack
 
 global_lock = Lock()
 
@@ -70,6 +71,7 @@ class Bottleneck(nn.Module):
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.randInd = randInd
         self.freezeBN = freezeBN
+        self.freezeFlag = False
         self.bn1 = nn.BatchNorm2d(planes)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride,
                                padding=1, bias=False)
@@ -85,38 +87,24 @@ class Bottleneck(nn.Module):
         x = residual = x['x']
 
         if refreshFreeze:
-            if random.random() <= self.randInd:
-                for param in chain(self.conv1.parameters(), self.conv2.parameters(), self.conv3.parameters()):
-                    param.requires_grad = False
-                if self.freezeBN:
-                    for param in chain(self.bn1.parameters(), self.bn2.parameters(), self.bn3.parameters()):
-                        param.requires_grad = False
-            else:
-                for param in chain(self.conv1.parameters(), self.bn1.parameters(),
-                                   self.conv2.parameters(), self.bn2.parameters(),
-                                   self.conv3.parameters(), self.bn3.parameters()):
-                    param.requires_grad = True
+            self.freezeFlag = (random.random() <= self.randInd)
 
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
+        with ExitStack() as stack:
+            if self.freezeFlag:
+                stack.enter_context(torch.no_grad())
+            out = self.conv1(x)
+            out = self.bn1(out)
+            out = self.relu(out)
 
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
+            out = self.conv2(out)
+            out = self.bn2(out)
+            out = self.relu(out)
 
-        out = self.conv3(out)
-        out = self.bn3(out)
+            out = self.conv3(out)
+            out = self.bn3(out)
 
-        if self.downsample is not None:
-            if refreshFreeze:
-                if random.random() <= self.randInd:
-                    for param in self.downsample.parameters():
-                        param.requires_grad = False
-                else:
-                    for param in self.downsample.parameters():
-                        param.requires_grad = True
-            residual = self.downsample(x)
+            if self.downsample is not None:
+                residual = self.downsample(x)
 
         out += residual
         out = self.relu(out)
@@ -133,6 +121,7 @@ class ResNet(nn.Module):
         self.randInd = randInd
         self.freezeBN = freezeBN
         self.refreshFreeze = False
+        self.freezeFlag = False
         print("randInd is {}".format(randInd))
         print("freezeBN is {}".format(freezeBN))
 
@@ -176,22 +165,18 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        # if self refreshFreeze is set as True. Refresh all the params in this forward and set it back to False at last
+        # if self refreshFreeze is set as True. Refresh freezeFlag and set it back to False at last
         if self.refreshFreeze:
-            if random.random() <= self.randInd:
-                for param in self.conv1.parameters():
-                    param.requires_grad = False
-                if self.freezeBN:
-                    for param in self.bn1.parameters():
-                        param.requires_grad = False
-            else:
-                for param in chain(self.bn1.parameters()):
-                    param.requires_grad = True
+            self.freezeFlag = (random.random() <= self.randInd)
 
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
+        with ExitStack() as stack:
+            if self.freezeFlag:
+                stack.enter_context(torch.no_grad())
+
+            x = self.conv1(x)
+            x = self.bn1(x)
+            x = self.relu(x)
+            x = self.maxpool(x)
 
         x = {'x': x, 'refreshFreeze': self.refreshFreeze}
         x = self.layer1(x)
@@ -203,6 +188,7 @@ class ResNet(nn.Module):
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
+
         self.refreshFreeze = False
 
         return x

@@ -20,11 +20,10 @@ def conv3x3(in_planes, out_planes, stride=1):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, randInd=0, freezeBN=True):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, potentialFreezeFlag=False):
         super(BasicBlock, self).__init__()
         self.conv1 = conv3x3(inplanes, planes, stride)
-        self.freezeBN = freezeBN
-        self.randInd = randInd
+        self.potentialFreezeFlag = potentialFreezeFlag
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
@@ -33,20 +32,15 @@ class BasicBlock(nn.Module):
         self.stride = stride
 
     def forward(self, x):
-        refreshFreeze = x['refreshFreeze']
+        freezeFlag = x['freezeFlag']
         x = residual = x['x']
 
-        if refreshFreeze:
-            if random.random() <= self.randInd:
-                for param in chain(self.conv1.parameters(), self.conv2.parameters()):
-                    param.requires_grad = False
-                if self.freezeBN:
-                    for param in chain(self.bn1.parameters(), self.bn2.parameters()):
-                        param.requires_grad = False
-            else:
-                for param in chain(self.conv1.parameters(), self.bn1.parameters(),
-                                   self.conv2.parameters(), self.bn2.parameters()):
-                    param.requires_grad = True
+        if self.potentialFreezeFlag and freezeFlag:
+            for param in self.parameters():
+                param.requires_grad = False
+        else:
+            for param in self.parameters():
+                param.requires_grad = True
 
         out = self.conv1(x)
         out = self.bn1(out)
@@ -56,18 +50,11 @@ class BasicBlock(nn.Module):
         out = self.bn2(out)
 
         if self.downsample is not None:
-            if random.random() <= self.randInd:
-                for param in self.downsample:
-                    param.requires_grad = False
-            else:
-                for param in self.downsample:
-                    param.requires_grad = True
-
             residual = self.downsample(x)
 
         out += residual
         out = self.relu(out)
-        return {'x': out, 'refreshFreeze': refreshFreeze}
+        return {'x': out, 'freezeFlag': freezeFlag}
 
 
 ########################################
@@ -77,19 +64,17 @@ class BasicBlock(nn.Module):
 
 class ResNet(nn.Module):
     """Original ResNet without routing modules"""
-    def __init__(self, block, layers, num_classes=10, randInd=0, freezeBN=True):
+    def __init__(self, block, layers, num_classes=10, randInd=0):
         self.randInd = randInd
-        self.freezeBN = freezeBN
         print("randInd is {}".format(randInd))
-        print("freezeBN is {}".format(freezeBN))
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = conv3x3(3, 16)
         self.bn1 = nn.BatchNorm2d(16)
         self.relu = nn.ReLU(inplace=True)
-        self.layer1 = self._make_layer(block, 16, layers[0])
-        self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
+        self.layer1 = self._make_layer(block, 16, layers[0], freezePolicy='Whole')
+        self.layer2 = self._make_layer(block, 32, layers[1], stride=2, freezePolicy='Half')
+        self.layer3 = self._make_layer(block, 64, layers[2], stride=2, freezePolicy='None')
         self.avgpool = nn.AvgPool2d(8)
         self.fc = nn.Linear(64 * block.expansion, num_classes)
 
@@ -101,7 +86,9 @@ class ResNet(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
-    def _make_layer(self, block, planes, blocks, stride=1):
+    def _make_layer(self, block, planes, blocks, stride=1, freezePolicy='None'):
+        # freezePolicy is None, Half or Whole
+        print("Freeze policy is {}".format(freezePolicy))
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -111,30 +98,33 @@ class ResNet(nn.Module):
             )
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, randInd=self.randInd, freezeBN=self.freezeBN))
+        layers.append(block(self.inplanes, planes, stride, downsample,
+                            potentialFreezeFlag=(freezePolicy == 'Whole' or freezePolicy == 'Half')))
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes, randInd=self.randInd))
+            layers.append(block(self.inplanes, planes,
+                                potentialFreezeFlag=(freezePolicy == 'Whole' or
+                                                     (freezePolicy == 'Half' and i < blocks/2))))
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, refreshFreeze = False):
-        if refreshFreeze:
-            if random.random() <= self.randInd:
-                for param in self.conv1.parameters():
-                    param.requires_grad = False
-                if self.freezeBN:
-                    for param in self.bn1.parameters():
-                        param.requires_grad = False
-            else:
-                for param in chain(self.conv1.parameters(), self.bn1.parameters()):
-                    param.requires_grad = True
+    def forward(self, x, freezeFlag=False):
+
+        if random.random() < self.randInd:
+            freezeFlag = True
+
+        if freezeFlag:
+            for param in chain(self.conv1.parameters(), self.bn1.parameters()):
+                param.requires_grad = False
+        else:
+            for param in chain(self.conv1.parameters(), self.bn1.parameters()):
+                param.requires_grad = True
 
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
 
-        x = {'x': x, 'refreshFreeze': refreshFreeze}
+        x = {'x': x, 'freezeFlag': freezeFlag}
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)

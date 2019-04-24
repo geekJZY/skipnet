@@ -35,7 +35,7 @@ def parse_args():
                         help='the experiment name')
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
-    parser.add_argument('--epochs', default=120, type=int, metavar='N',
+    parser.add_argument('--epochs', default=30, type=int, metavar='N',
                         help='number of total epochs to run')
     parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                         help='manual epoch number (useful on restarts)')
@@ -175,8 +175,8 @@ def run_training(args, logger):
 
         # train for one epoch
 
-        # train(args, train_loader, model, criterion, optimizer, epoch, args.device, logger,
-        #       refreshFreeze=(epoch % args.refreshFreeze == 0), finetuneFlag=(epoch >= finetuneEpoch))
+        train(args, train_loader, model, criterion, optimizer, epoch, args.device, logger,
+              refreshFreeze=(epoch % args.refreshFreeze == 0), finetuneFlag=(epoch >= finetuneEpoch))
 
         # evaluate on validation set
         prec1 = validate(args, val_loader, model, criterion, logger)
@@ -367,8 +367,8 @@ class AverageMeter(object):
 
 
 def adjust_learning_rate(args, optimizer, epoch, logger):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = args.lr * (args.step_ratio ** (epoch // 30))
+    """Sets the learning rate to the initial LR decayed by 10 every 10 epochs"""
+    lr = args.lr * (args.step_ratio ** (epoch // 10))
     logger.info('Epoch [{}] Learning rate: {}'.format(epoch, lr))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr

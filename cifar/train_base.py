@@ -68,14 +68,14 @@ def parse_args():
                         help='evaluate model every (default: 1000) iterations')
     parser.add_argument('--randInd', default=0.0, type=float,
                         help='the proportion of freezed params')
-    parser.add_argument('--refreshFreeze', default=1000, type=int,
-                        help='the iteration number the refresh the target freezing layer')
-    parser.add_argument('--initIters', default=0, type=int,
-                        help='the iterations train with whole network, provide as a initialization')
-    parser.add_argument('--freezeBN', action='store_true',
-                        help='If the batch norm is randomly freezed while training')
-    parser.add_argument('--endFinetune', default=0, type=int,
-                        help='the iterations for finetuning the whole network')
+    # parser.add_argument('--refreshFreeze', default=1000, type=int,
+    #                     help='the iteration number the refresh the target freezing layer')
+    # parser.add_argument('--initIters', default=0, type=int,
+    #                     help='the iterations train with whole network, provide as a initialization')
+    # parser.add_argument('--freezeBN', action='store_true',
+    #                     help='If the batch norm is randomly freezed while training')
+    # parser.add_argument('--endFinetune', default=0, type=int,
+    #                     help='the iterations for finetuning the whole network')
     args = parser.parse_args()
     return args
 
@@ -132,7 +132,7 @@ def run_training(args, logger):
     device = args.device
 
     # create model
-    model = models.__dict__[args.arch](args.pretrained, randInd=args.randInd, freezeBN=args.freezeBN)
+    model = models.__dict__[args.arch](args.pretrained, randInd=args.randInd)
     model = model.to(device)
 
     best_prec1 = 0
@@ -177,7 +177,7 @@ def run_training(args, logger):
     end = time.time()
     dataloader_iterator = iter(train_loader)
 
-    finetuneIter = args.iters - args.endFinetune
+    # finetuneIter = args.iters - args.endFinetune
     for i in range(args.start_iter, args.iters):
         model.train()
         adjust_learning_rate(args, optimizer, i)
@@ -195,13 +195,13 @@ def run_training(args, logger):
         target = target.squeeze().long().to(device)
 
         # compute output
-        refreshFlag = True
-        if i >= finetuneIter:
-            for param in model.parameters():
-                param.requires_grad = True
-            refreshFlag = False
+        # refreshFlag = True
+        # if i >= finetuneIter:
+        #     for param in model.parameters():
+        #         param.requires_grad = True
+        #     refreshFlag = False
 
-        output = model(input, refreshFreeze=(i >= args.initIters) and (i % args.refreshFreeze == 0) and refreshFlag)
+        output = model(input)
         loss = criterion(output, target)
 
         # measure accuracy and record loss
