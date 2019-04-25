@@ -120,22 +120,22 @@ class ResNet(nn.Module):
         #     for param in chain(self.conv1.parameters(), self.bn1.parameters()):
         #         param.requires_grad = True
 
-        with ExitStack() as stack:
-            if freezeFlag:
-                stack.enter_context(torch.no_grad())
+        # with ExitStack() as stack:
+        #     if freezeFlag:
+        #         stack.enter_context(torch.no_grad())
 
-            x = self.conv1(x)
-            x = self.bn1(x)
-            x = self.relu(x)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
 
-            x = {'x': x, 'freezeFlag': False}
-            x = self.layer1(x)
-            x = self.layer2(x)
-            x = self.layer3(x)
-            x = x['x']
+        x = {'x': x, 'freezeFlag': False}
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = x['x']
 
-            x = self.avgpool(x)
-            x = x.view(x.size(0), -1)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
 

@@ -15,6 +15,7 @@ import logging
 
 import models
 from data import *
+import random
 
 
 model_names = sorted(name for name in models.__dict__
@@ -191,28 +192,30 @@ def run_training(args, logger):
         # measuring data loading time
         data_time.update(time.time() - end)
 
-        input = input.to(device)
-        target = target.squeeze().long().to(device)
+        if random.random() >= args.randInd:
 
-        # compute output
-        # refreshFlag = True
-        # if i >= finetuneIter:
-        #     for param in model.parameters():
-        #         param.requires_grad = True
-        #     refreshFlag = False
+            input = input.to(device)
+            target = target.squeeze().long().to(device)
 
-        output = model(input)
-        loss = criterion(output, target)
+            # compute output
+            # refreshFlag = True
+            # if i >= finetuneIter:
+            #     for param in model.parameters():
+            #         param.requires_grad = True
+            #     refreshFlag = False
 
-        # measure accuracy and record loss
-        prec1, = accuracy(output.data, target, topk=(1,))
-        losses.update(loss.data, input.size(0))
-        top1.update(prec1, input.size(0))
+            output = model(input)
+            loss = criterion(output, target)
 
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            # measure accuracy and record loss
+            prec1, = accuracy(output.data, target, topk=(1,))
+            losses.update(loss.data, input.size(0))
+            top1.update(prec1, input.size(0))
+
+            # compute gradient and do SGD step
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
